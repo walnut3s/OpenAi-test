@@ -1,0 +1,21 @@
+//@version=6
+indicator("Hourly & 4H Close Lines", overlay=true, max_lines_count=500)
+show1h = input.bool(true, "Show 1H close lines")
+show4h = input.bool(true, "Show 4H close lines")
+new1h = timeframe.change("60")
+new4h = timeframe.change("240")
+
+var line line1h = na
+var line line4h = na
+
+if show1h
+    if new1h and not na(close[1])
+        line1h := line.new(time[1], close[1], time, close[1], xloc=xloc.bar_time, color=color.blue, width=1)
+    else if not na(line1h)
+        line.set_x2(line1h, time)
+
+if show4h
+    if new4h and not na(close[1])
+        line4h := line.new(time[1], close[1], time, close[1], xloc=xloc.bar_time, color=color.red, width=2)
+    else if not na(line4h)
+        line.set_x2(line4h, time)
