@@ -1,8 +1,7 @@
 //@version=6
-indicator("Multi-TF Close / High-Low Lines", overlay=true, max_lines_count=500)
+indicator("Multi-TF Anchor Lines", overlay=true, max_lines_count=500)
 
-anchorInput = input.string("Close", "Anchor point", options=["Close", "High/Low"], tooltip="Anchor lines to the close of each completed period, or to its high and low (two lines per period).")
-useClose = anchorInput == "Close"
+anchorInput = input.string("Close", "Anchor point", options=["Close", "High", "Low"], tooltip="Anchor lines to the close, high, or low of each completed period.")
 
 grp = "Timeframes"
 show5m  = input.bool(false, "5 min",  group=grp, inline="5")
@@ -18,17 +17,18 @@ colD    = input.color(color.orange, "", group=grp, inline="D")
 showW   = input.bool(false, "Weekly", group=grp, inline="W")
 colW    = input.color(color.purple, "", group=grp, inline="W")
 
-// Close/high/low of the last completed bar on the given timeframe. [1] with
+// Anchor value of the last completed bar on the given timeframe. [1] with
 // lookahead_on is the standard non-repainting way to read a finished HTF bar.
+anchorSrc = anchorInput == "High" ? high : anchorInput == "Low" ? low : close
 htf(tf) =>
-    request.security(syminfo.tickerid, tf, [close[1], high[1], low[1]], lookahead=barmerge.lookahead_on)
+    request.security(syminfo.tickerid, tf, anchorSrc[1], lookahead=barmerge.lookahead_on)
 
-[c5,  h5,  l5]  = htf("5")
-[c15, h15, l15] = htf("15")
-[c1h, h1h, l1h] = htf("60")
-[c4h, h4h, l4h] = htf("240")
-[cD,  hD,  lD]  = htf("D")
-[cW,  hW,  lW]  = htf("W")
+v5m  = htf("5")
+v15m = htf("15")
+v1h  = htf("60")
+v4h  = htf("240")
+vD   = htf("D")
+vW   = htf("W")
 
 new5m  = timeframe.change("5")
 new15m = timeframe.change("15")
@@ -37,27 +37,17 @@ new4h  = timeframe.change("240")
 newD   = timeframe.change("D")
 newW   = timeframe.change("W")
 
-// Draws the line(s) for one timeframe: a single close line, or a high and a
-// low line, depending on the anchor setting. Lines start at the period
-// boundary and extend along the current bar.
-drawTf(show, isNew, c, h, l, col, wid) =>
-    var line lnC = na
-    var line lnH = na
-    var line lnL = na
-    makeC  = show and isNew and useClose and not na(c)
-    makeHL = show and isNew and not useClose and not na(h)
-    lnC := makeC  ? line.new(time[1], c, time, c, xloc=xloc.bar_time, color=col, width=wid) : lnC
-    lnH := makeHL ? line.new(time[1], h, time, h, xloc=xloc.bar_time, color=col, width=wid) : lnH
-    lnL := makeHL ? line.new(time[1], l, time, l, xloc=xloc.bar_time, color=col, width=wid) : lnL
-    if show and not na(lnC)
-        line.set_x2(lnC, time)
-    if show and not na(lnH)
-        line.set_x2(lnH, time)
-        line.set_x2(lnL, time)
+// Draws the anchor line for one timeframe. A new line starts at each period
+// boundary and extends along the current bar.
+drawTf(show, isNew, v, col, wid) =>
+    var line ln = na
+    ln := show and isNew and not na(v) ? line.new(time[1], v, time, v, xloc=xloc.bar_time, color=col, width=wid) : ln
+    if show and not na(ln)
+        line.set_x2(ln, time)
 
-drawTf(show5m,  new5m,  c5,  h5,  l5,  col5m,  1)
-drawTf(show15m, new15m, c15, h15, l15, col15m, 1)
-drawTf(show1h,  new1h,  c1h, h1h, l1h, col1h,  1)
-drawTf(show4h,  new4h,  c4h, h4h, l4h, col4h,  2)
-drawTf(showD,   newD,   cD,  hD,  lD,  colD,   2)
-drawTf(showW,   newW,   cW,  hW,  lW,  colW,   3)
+drawTf(show5m,  new5m,  v5m,  col5m,  1)
+drawTf(show15m, new15m, v15m, col15m, 1)
+drawTf(show1h,  new1h,  v1h,  col1h,  1)
+drawTf(show4h,  new4h,  v4h,  col4h,  2)
+drawTf(showD,   newD,   vD,   colD,   2)
+drawTf(showW,   newW,   vW,   colW,   3)
