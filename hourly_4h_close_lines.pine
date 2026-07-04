@@ -44,19 +44,16 @@ drawTf(show, isNew, c, h, l, col, wid) =>
     var line lnC = na
     var line lnH = na
     var line lnL = na
-    if show
-        if isNew and useClose and not na(c)
-            lnC := line.new(time[1], c, time, c, xloc=xloc.bar_time, color=col, width=wid)
-        else if not na(lnC)
-            line.set_x2(lnC, time)
-        if isNew and not useClose and not na(h)
-            lnH := line.new(time[1], h, time, h, xloc=xloc.bar_time, color=col, width=wid)
-            lnL := line.new(time[1], l, time, l, xloc=xloc.bar_time, color=col, width=wid)
-        else
-            if not na(lnH)
-                line.set_x2(lnH, time)
-            if not na(lnL)
-                line.set_x2(lnL, time)
+    makeC  = show and isNew and useClose and not na(c)
+    makeHL = show and isNew and not useClose and not na(h)
+    lnC := makeC  ? line.new(time[1], c, time, c, xloc=xloc.bar_time, color=col, width=wid) : lnC
+    lnH := makeHL ? line.new(time[1], h, time, h, xloc=xloc.bar_time, color=col, width=wid) : lnH
+    lnL := makeHL ? line.new(time[1], l, time, l, xloc=xloc.bar_time, color=col, width=wid) : lnL
+    if show and not na(lnC)
+        line.set_x2(lnC, time)
+    if show and not na(lnH)
+        line.set_x2(lnH, time)
+        line.set_x2(lnL, time)
 
 drawTf(show5m,  new5m,  c5,  h5,  l5,  col5m,  1)
 drawTf(show15m, new15m, c15, h15, l15, col15m, 1)
