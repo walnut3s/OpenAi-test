@@ -1,9 +1,18 @@
 //@version=6
-indicator("Multi-TF Anchor Lines", overlay=true, max_lines_count=500)
+//
+// @author Reza (Modified)
+// Multi-timeframe anchor lines (close/high/low of completed periods)
+// merged with the simplified multi-timeframe VWAP indicator.
+//
+indicator("Multi-TF Anchor Lines + 4 VWAPs", shorttitle="MTF+4VWAP", overlay=true, max_lines_count=500)
 
-anchorInput = input.string("Close", "Anchor point", options=["Close", "High", "Low"], tooltip="Anchor lines to the close, high, or low of each completed period.")
+//////////////////////////////////////////////////////////////
+// ANCHOR LINE INPUTS
+//////////////////////////////////////////////////////////////
 
-grp = "Timeframes"
+anchorInput = input.string("Close", "Anchor point", options=["Close", "High", "Low"], group="Anchor lines", tooltip="Anchor lines to the close, high, or low of each completed period.")
+
+grp = "Anchor lines"
 show5m  = input.bool(false, "5 min",  group=grp, inline="5")
 col5m   = input.color(color.gray,   "", group=grp, inline="5")
 show15m = input.bool(false, "15 min", group=grp, inline="15")
@@ -16,6 +25,10 @@ showD   = input.bool(false, "Daily",  group=grp, inline="D")
 colD    = input.color(color.orange, "", group=grp, inline="D")
 showW   = input.bool(false, "Weekly", group=grp, inline="W")
 colW    = input.color(color.purple, "", group=grp, inline="W")
+
+//////////////////////////////////////////////////////////////
+// ANCHOR LINES
+//////////////////////////////////////////////////////////////
 
 // Anchor value of the last completed bar on the given timeframe. [1] with
 // lookahead_on is the standard non-repainting way to read a finished HTF bar.
@@ -51,3 +64,65 @@ drawTf(show1h,  new1h,  v1h,  col1h,  1)
 drawTf(show4h,  new4h,  v4h,  col4h,  2)
 drawTf(showD,   newD,   vD,   colD,   2)
 drawTf(showW,   newW,   vW,   colW,   3)
+
+//////////////////////////////////////////////////////////////
+// VWAP TIMEFRAME INPUTS
+//////////////////////////////////////////////////////////////
+
+vwapGrp = "VWAP"
+TimeFrame     = input.timeframe("W",   "VWAP anchor 1 (Weekly)", group=vwapGrp)
+TimeFrame_2   = input.timeframe("D",   "VWAP anchor 2 (Daily)",  group=vwapGrp)
+TimeFrame_240 = input.timeframe("240", "VWAP anchor 3 (4-Hour)", group=vwapGrp)
+TimeFrame_3   = input.timeframe("60",  "VWAP anchor 4 (1-Hour)", group=vwapGrp)
+
+showPrevVWAP     = input.bool(false, "Show previous Weekly VWAP close", group=vwapGrp)
+showPrevVWAP_2   = input.bool(false, "Show previous Daily VWAP close",  group=vwapGrp)
+showPrevVWAP_240 = input.bool(false, "Show previous 4H VWAP close",     group=vwapGrp)
+showPrevVWAP_3   = input.bool(false, "Show previous 1H VWAP close",     group=vwapGrp)
+
+//////////////////////////////////////////////////////////////
+// VWAP CALCULATIONS
+//////////////////////////////////////////////////////////////
+
+// Anchored VWAP for one timeframe: sums reset at each period boundary.
+// Returns the running VWAP and the VWAP frozen at the previous period's close.
+vwapTf(tf) =>
+    isNew = timeframe.change(tf)
+    var float vwapsum   = na
+    var float volumesum = na
+    vwapsum   := isNew ? hl2 * volume : vwapsum + hl2 * volume
+    volumesum := isNew ? volume : volumesum + volume
+    myvwap = vwapsum / volumesum
+    var float prevwap = na
+    prevwap := isNew ? myvwap[1] : prevwap
+    [myvwap, prevwap]
+
+[myvwap,     prevwap]     = vwapTf(TimeFrame)
+[myvwap_2,   prevwap_2]   = vwapTf(TimeFrame_2)
+[myvwap_240, prevwap_240] = vwapTf(TimeFrame_240)
+[myvwap_3,   prevwap_3]   = vwapTf(TimeFrame_3)
+
+//////////////////////////////////////////////////////////////
+// COLORING
+//////////////////////////////////////////////////////////////
+
+Coloring     = close > myvwap     ? color.green : color.red
+Coloring_2   = close > myvwap_2   ? color.green : color.red
+Coloring_240 = close > myvwap_240 ? color.green : color.red
+Coloring_3   = close > myvwap_3   ? color.green : color.red
+
+//////////////////////////////////////////////////////////////
+// PLOTS
+//////////////////////////////////////////////////////////////
+
+// Current VWAP levels
+plot(myvwap,     style=plot.style_circles, color=Coloring,     linewidth=1, title="VWAP - Weekly Anchored")
+plot(myvwap_2,   style=plot.style_circles, color=Coloring_2,   linewidth=1, title="VWAP - Daily Anchored")
+plot(myvwap_240, style=plot.style_circles, color=Coloring_240, linewidth=1, title="VWAP - 4 Hour Anchored")
+plot(myvwap_3,   style=plot.style_circles, color=Coloring_3,   linewidth=1, title="VWAP - 1 Hour Anchored")
+
+// Previous VWAP close levels (optional)
+plot(showPrevVWAP     ? prevwap     : na, style=plot.style_circles, color=close > prevwap     ? color.green : color.red, linewidth=1, title="Previous Week VWAP Close")
+plot(showPrevVWAP_2   ? prevwap_2   : na, style=plot.style_circles, color=close > prevwap_2   ? color.green : color.red, linewidth=1, title="Previous Day VWAP Close")
+plot(showPrevVWAP_240 ? prevwap_240 : na, style=plot.style_circles, color=close > prevwap_240 ? color.green : color.red, linewidth=1, title="Previous 4H VWAP Close")
+plot(showPrevVWAP_3   ? prevwap_3   : na, style=plot.style_circles, color=close > prevwap_3   ? color.green : color.red, linewidth=1, title="Previous 1H VWAP Close")
