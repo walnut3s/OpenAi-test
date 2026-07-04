@@ -5,17 +5,23 @@ show4h = input.bool(true, "Show 4H close lines")
 new1h = timeframe.change("60")
 new4h = timeframe.change("240")
 
+// Close of the last completed 1H / 4H candle — i.e. the close of the final
+// 1-min candle of that hour / 4-hour period. close[1] with lookahead_on is
+// the standard non-repainting way to read a finished HTF bar.
+close1h = request.security(syminfo.tickerid, "60", close[1], lookahead=barmerge.lookahead_on)
+close4h = request.security(syminfo.tickerid, "240", close[1], lookahead=barmerge.lookahead_on)
+
 var line line1h = na
 var line line4h = na
 
 if show1h
-    if new1h and not na(close[1])
-        line1h := line.new(time[1], close[1], time, close[1], xloc=xloc.bar_time, color=color.blue, width=1)
+    if new1h and not na(close1h)
+        line1h := line.new(time[1], close1h, time, close1h, xloc=xloc.bar_time, color=color.blue, width=1)
     else if not na(line1h)
         line.set_x2(line1h, time)
 
 if show4h
-    if new4h and not na(close[1])
-        line4h := line.new(time[1], close[1], time, close[1], xloc=xloc.bar_time, color=color.red, width=2)
+    if new4h and not na(close4h)
+        line4h := line.new(time[1], close4h, time, close4h, xloc=xloc.bar_time, color=color.red, width=2)
     else if not na(line4h)
         line.set_x2(line4h, time)
