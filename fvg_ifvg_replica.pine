@@ -1,0 +1,288 @@
+//@version=6
+indicator("FVG/iFVG Replica v2", shorttitle = "FVG/iFVG v2", overlay = true, max_boxes_count = 500)
+
+// Rewritten to fix the repainting and stale-zone problems of the first draft:
+//  - No request.security: higher-timeframe (HTF) bars are aggregated locally from
+//    chart bars, so historical and realtime behavior are identical (no lookahead bias).
+//  - Developing-gap zones ("Wait for close" off) are re-validated on every chart bar
+//    while the HTF bar forms: boundaries tighten with price, and the zone is deleted
+//    if the gap closes before the HTF bar confirms.
+//  - "Max bars back" is measured in chart bars for every timeframe (one consistent unit).
+//  - Inversion to iFVG requires a CLOSE through the gap; the "H/L" fill type still lets
+//    wicks mitigate/remove plain FVGs and inverse zones.
+//  - Timeframes lower than the chart timeframe are skipped: they cannot be aggregated
+//    from chart bars and gave unreliable results in the original approach.
+// Limitation: timeframes that do not align with the chart timeframe (e.g. 15m zones on
+// a 4m chart) aggregate approximately. Use divisor timeframes for exact zones.
+
+// =============================================================================
+// Inputs
+// =============================================================================
+
+string GROUP_TF     = "Timeframes"
+string GROUP_FVG    = "FVG settings"
+string GROUP_LABELS = "Label Settings"
+string GROUP_BOXES  = "Box Settings"
+string GROUP_BORDER = "Border Settings"
+
+bool useTf1 = input.bool(true,  "", inline = "tf1", group = GROUP_TF)
+string tf1  = input.timeframe("", "Timeframe 1", inline = "tf1", group = GROUP_TF)
+bool useTf2 = input.bool(true,  "", inline = "tf2", group = GROUP_TF)
+string tf2  = input.timeframe("15", "Timeframe 2", inline = "tf2", group = GROUP_TF)
+bool useTf3 = input.bool(true,  "", inline = "tf3", group = GROUP_TF)
+string tf3  = input.timeframe("60", "Timeframe 3", inline = "tf3", group = GROUP_TF)
+bool useTf4 = input.bool(true,  "", inline = "tf4", group = GROUP_TF)
+string tf4  = input.timeframe("240", "Timeframe 4", inline = "tf4", group = GROUP_TF)
+bool useTf5 = input.bool(true,  "", inline = "tf5", group = GROUP_TF)
+string tf5  = input.timeframe("1D", "Timeframe 5", inline = "tf5", group = GROUP_TF)
+
+bool waitForClose = input.bool(false, "Wait for candle close to identify FVGs ?", group = GROUP_FVG)
+bool showFvg      = input.bool(true, "Show FVG", group = GROUP_FVG)
+bool showIfvg     = input.bool(false, "Show iFVG", group = GROUP_FVG)
+string fillType   = input.string("Close", "Filled FVG Type", options = ["Close", "H/L"], group = GROUP_FVG)
+int maxBarsBack   = input.int(300, "Max chart bars back to find FVGs ?", minval = 1, maxval = 10000, group = GROUP_FVG)
+
+bool showLabels   = input.bool(true, "Show Labels ?", group = GROUP_LABELS)
+int labelDistance = input.int(10, "Label Distance (Extend option only)", minval = 1, maxval = 500, group = GROUP_LABELS)
+string tf1FvgText = input.string("FVG", "TF1 Labels: FVG", inline = "lab1", group = GROUP_LABELS)
+string tf1InvText = input.string("iFVG", "| iFVG", inline = "lab1", group = GROUP_LABELS)
+string tf2FvgText = input.string("15m FVG", "TF2 Labels: FVG", inline = "lab2", group = GROUP_LABELS)
+string tf2InvText = input.string("15m iFVG", "| iFVG", inline = "lab2", group = GROUP_LABELS)
+string tf3FvgText = input.string("1h FVG", "TF3 Labels: FVG", inline = "lab3", group = GROUP_LABELS)
+string tf3InvText = input.string("1h iFVG", "| iFVG", inline = "lab3", group = GROUP_LABELS)
+string tf4FvgText = input.string("4h FVG", "TF4 Labels: FVG", inline = "lab4", group = GROUP_LABELS)
+string tf4InvText = input.string("4h iFVG", "| iFVG", inline = "lab4", group = GROUP_LABELS)
+string tf5FvgText = input.string("D FVG", "TF5 Labels: FVG", inline = "lab5", group = GROUP_LABELS)
+string tf5InvText = input.string("D iFVG", "| iFVG", inline = "lab5", group = GROUP_LABELS)
+
+bool deleteAfterFill = input.bool(true, "Delete Boxes after fill ?", group = GROUP_BOXES)
+bool extendBoxes     = input.bool(false, "Extend Boxes ?", group = GROUP_BOXES)
+int boxLength        = input.int(20, "Length of Boxes", minval = 1, maxval = 500, group = GROUP_BOXES)
+color fvgBullColor   = input.color(color.new(color.rgb(0, 230, 118), 90), "FVG Box Color: Bullish", inline = "fvgFill", group = GROUP_BOXES)
+color fvgBearColor   = input.color(color.new(color.rgb(242, 54, 69), 90), "| Bearish", inline = "fvgFill", group = GROUP_BOXES)
+color invBullColor   = input.color(color.new(color.rgb(41, 98, 255), 90), "iFVG Box Color: Bullish", inline = "invFill", group = GROUP_BOXES)
+color invBearColor   = input.color(color.new(color.rgb(255, 152, 0), 90), "| Bearish", inline = "invFill", group = GROUP_BOXES)
+
+string borderChoice = input.string("Solid", "Border style", options = ["Solid", "Dashed", "Dotted"], group = GROUP_BORDER)
+int borderWidth     = input.int(1, "Border Width ?", minval = 0, maxval = 4, group = GROUP_BORDER)
+color fvgBullBorder = input.color(color.new(color.rgb(0, 230, 118), 100), "FVG Border Colors: Bullish", inline = "fvgBorder", group = GROUP_BORDER)
+color fvgBearBorder = input.color(color.new(color.rgb(242, 54, 69), 100), "| Bearish", inline = "fvgBorder", group = GROUP_BORDER)
+color invBullBorder = input.color(color.new(color.rgb(0, 230, 118), 100), "iFVG Border Colors: Bullish", inline = "invBorder", group = GROUP_BORDER)
+color invBearBorder = input.color(color.new(color.rgb(242, 54, 69), 100), "| Bearish", inline = "invBorder", group = GROUP_BORDER)
+
+// =============================================================================
+// Types and state
+// =============================================================================
+
+// One record per drawn zone. `pending` means the HTF bar that created the gap
+// has not closed yet, so the zone may still shrink or be invalidated.
+type Zone
+    box   bx
+    float top
+    float bottom
+    bool  bull
+    bool  inverse
+    bool  pending
+    int   tfIndex
+
+// Rolling HTF aggregation built from chart bars.
+// curStart/curHigh/curLow describe the developing HTF bar; h1/l1 and h2/l2 are
+// the last two completed HTF bars (1 and 2 bars behind the developing one).
+type TfState
+    int   curStart
+    float curHigh
+    float curLow
+    float h1
+    float l1
+    float h2
+    float l2
+
+lineStyle = switch borderChoice
+    "Dashed" => line.style_dashed
+    "Dotted" => line.style_dotted
+    => line.style_solid
+
+string rtf1 = tf1 == "" ? timeframe.period : tf1
+string rtf2 = tf2 == "" ? timeframe.period : tf2
+string rtf3 = tf3 == "" ? timeframe.period : tf3
+string rtf4 = tf4 == "" ? timeframe.period : tf4
+string rtf5 = tf5 == "" ? timeframe.period : tf5
+
+var array<bool> enabledTfs   = array.from(useTf1, useTf2, useTf3, useTf4, useTf5)
+var array<int> tfSeconds     = array.from(timeframe.in_seconds(rtf1), timeframe.in_seconds(rtf2), timeframe.in_seconds(rtf3), timeframe.in_seconds(rtf4), timeframe.in_seconds(rtf5))
+var array<string> fvgTexts   = array.from(tf1FvgText, tf2FvgText, tf3FvgText, tf4FvgText, tf5FvgText)
+var array<string> invTexts   = array.from(tf1InvText, tf2InvText, tf3InvText, tf4InvText, tf5InvText)
+var array<TfState> tfStates  = array.from(TfState.new(), TfState.new(), TfState.new(), TfState.new(), TfState.new())
+var array<Zone> zones        = array.new<Zone>()
+
+var int chartMs  = timeframe.in_seconds() * 1000
+int chartSeconds = timeframe.in_seconds()
+
+// time(tf) needs a simple string, so the five period starts are computed with the
+// resolved inputs directly and read from an array inside the loop.
+var array<int> periodStarts = array.new_int(5)
+array.set(periodStarts, 0, time(rtf1))
+array.set(periodStarts, 1, time(rtf2))
+array.set(periodStarts, 2, time(rtf3))
+array.set(periodStarts, 3, time(rtf4))
+array.set(periodStarts, 4, time(rtf5))
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+f_fill_color(bool bull, bool inverse) =>
+    inverse ? (bull ? invBullColor : invBearColor) : (bull ? fvgBullColor : fvgBearColor)
+
+f_border_color(bool bull, bool inverse) =>
+    inverse ? (bull ? invBullBorder : invBearBorder) : (bull ? fvgBullBorder : fvgBearBorder)
+
+// Label color follows the user-selected fill color, made fully opaque.
+f_text_color(bool bull, bool inverse) =>
+    color.new(f_fill_color(bull, inverse), 0)
+
+f_zone_remove(int idx) =>
+    Zone z = array.get(zones, idx)
+    box.delete(z.bx)
+    array.remove(zones, idx)
+
+f_zone_create(int startTime, float top, float bottom, bool bull, int tfIndex, bool pending) =>
+    color bg     = showFvg ? f_fill_color(bull, false) : color.new(color.black, 100)
+    color border = showFvg ? f_border_color(bull, false) : color.new(color.black, 100)
+    color txtCol = showFvg ? f_text_color(bull, false) : color.new(color.black, 100)
+    string txt   = showLabels ? array.get(fvgTexts, tfIndex) : ""
+    box bx = box.new(left = startTime, top = top, right = startTime + boxLength * chartMs, bottom = bottom,
+         xloc = xloc.bar_time, border_color = border, border_width = borderWidth, border_style = lineStyle,
+         bgcolor = bg, text = txt, text_color = txtCol, text_size = size.tiny,
+         text_halign = text.align_right, text_valign = text.align_center)
+    array.push(zones, Zone.new(bx, top, bottom, bull, false, pending, tfIndex))
+
+// Each timeframe has at most one pending zone (a gap can only exist from the first
+// chart bar of an HTF period, and once broken it cannot reform within the period).
+f_pending_index(int tfIndex) =>
+    int found = -1
+    int n = array.size(zones)
+    if n > 0
+        for j = n - 1 to 0
+            Zone z = array.get(zones, j)
+            if z.pending and z.tfIndex == tfIndex
+                found := j
+                break
+    found
+
+// =============================================================================
+// Detect new FVGs on each enabled timeframe
+// =============================================================================
+
+bool newBullFvg = false
+bool newBearFvg = false
+bool inWindow = bar_index >= math.max(0, last_bar_index - maxBarsBack)
+
+for tfIndex = 0 to 4
+    if not array.get(enabledTfs, tfIndex)
+        continue
+    if array.get(tfSeconds, tfIndex) < chartSeconds
+        continue
+    TfState st = array.get(tfStates, tfIndex)
+    int pStart = array.get(periodStarts, tfIndex)
+
+    if na(st.curStart) or pStart != st.curStart
+        if not na(st.curStart)
+            float fH = st.curHigh
+            float fL = st.curLow
+            int closedStart = st.curStart
+            if waitForClose and not na(st.h2) and (showFvg or showIfvg) and inWindow
+                if fL > st.h2
+                    f_zone_create(closedStart, fL, st.h2, true, tfIndex, false)
+                    newBullFvg := true
+                else if fH < st.l2
+                    f_zone_create(closedStart, st.l2, fH, false, tfIndex, false)
+                    newBearFvg := true
+            if not waitForClose
+                int pIdx = f_pending_index(tfIndex)
+                if pIdx >= 0
+                    Zone z = array.get(zones, pIdx)
+                    z.pending := false
+            st.h2 := st.h1
+            st.l2 := st.l1
+            st.h1 := fH
+            st.l1 := fL
+        st.curStart := pStart
+        st.curHigh := high
+        st.curLow := low
+    else
+        st.curHigh := math.max(st.curHigh, high)
+        st.curLow := math.min(st.curLow, low)
+
+    if not waitForClose and not na(st.h2) and (showFvg or showIfvg)
+        int pIdx = f_pending_index(tfIndex)
+        if pIdx >= 0
+            Zone z = array.get(zones, pIdx)
+            bool stillValid = z.bull ? st.curLow > st.h2 : st.curHigh < st.l2
+            if not stillValid
+                f_zone_remove(pIdx)
+            else if z.bull
+                z.top := st.curLow
+                box.set_top(z.bx, st.curLow)
+            else
+                z.bottom := st.curHigh
+                box.set_bottom(z.bx, st.curHigh)
+        else if inWindow
+            if st.curLow > st.h2
+                f_zone_create(st.curStart, st.curLow, st.h2, true, tfIndex, true)
+                newBullFvg := true
+            else if st.curHigh < st.l2
+                f_zone_create(st.curStart, st.l2, st.curHigh, false, tfIndex, true)
+                newBearFvg := true
+
+// =============================================================================
+// Extend, mitigate, and invert existing zones
+// =============================================================================
+
+bool newBullIfvg = false
+bool newBearIfvg = false
+
+if array.size(zones) > 0
+    for idx = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, idx)
+        if extendBoxes
+            box.set_right(z.bx, time + labelDistance * chartMs)
+        if z.pending
+            continue
+
+        bool closeThrough = z.bull ? close < z.bottom : close > z.top
+        bool filled = fillType == "Close" ? closeThrough : (z.bull ? low < z.bottom : high > z.top)
+
+        if not z.inverse
+            if showIfvg
+                // A wick-only fill (H/L mode) leaves the zone waiting; inversion
+                // needs a decisive close through the gap.
+                if closeThrough
+                    bool invBull = not z.bull
+                    z.bull := invBull
+                    z.inverse := true
+                    box.set_bgcolor(z.bx, f_fill_color(invBull, true))
+                    box.set_border_color(z.bx, f_border_color(invBull, true))
+                    box.set_text(z.bx, showLabels ? array.get(invTexts, z.tfIndex) : "")
+                    box.set_text_color(z.bx, f_text_color(invBull, true))
+                    if invBull
+                        newBullIfvg := true
+                    else
+                        newBearIfvg := true
+            else if filled and deleteAfterFill
+                f_zone_remove(idx)
+        else if filled and deleteAfterFill
+            f_zone_remove(idx)
+
+// Keep object use bounded even when fills are retained.
+while array.size(zones) > 480
+    f_zone_remove(0)
+
+// =============================================================================
+// Alerts
+// =============================================================================
+
+alertcondition(newBullFvg, "New Bullish FVG", "New bullish FVG detected")
+alertcondition(newBearFvg, "New Bearish FVG", "New bearish FVG detected")
+alertcondition(newBullIfvg, "New Bullish iFVG", "Bullish inverse FVG detected")
+alertcondition(newBearIfvg, "New Bearish iFVG", "Bearish inverse FVG detected")
