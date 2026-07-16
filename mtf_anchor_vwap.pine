@@ -1,0 +1,172 @@
+//@version=6
+//
+// @author Reza (Modified)
+// Multi-timeframe anchor lines (close/high/low of completed periods)
+// merged with four anchored multi-timeframe VWAPs.
+//
+// Revision notes:
+//  - Timeframes below the chart timeframe are hidden automatically:
+//    request.security() cannot read a lower timeframe reliably and
+//    timeframe.change() would fire on every chart bar, producing data
+//    that looks valid but is not.
+//  - Anchor lines are tracked per timeframe with their own history cap,
+//    so a fast timeframe can no longer evict Weekly/4H lines from the
+//    shared max_lines_count budget.
+//  - A period whose boundary bar has no anchor value gets its line on
+//    the first valid bar instead of being skipped, and the previous
+//    period's line is no longer extended across the gap.
+//  - VWAP source is an input (default hlc3, matching the built-in VWAP).
+//  - Symbols without volume raise a clear error, but only while at
+//    least one VWAP is enabled, so the anchor lines stay usable on
+//    volume-less symbols.
+//
+indicator("Multi-TF Anchor Lines + 4 VWAPs", shorttitle="MTF+4VWAP", overlay=true, max_lines_count=500)
+
+// True when `tf` is the chart timeframe or higher; lower timeframes are
+// hidden rather than plotted wrong.
+tfUsable(simple string tf) =>
+    timeframe.in_seconds(tf) >= timeframe.in_seconds(timeframe.period)
+
+//////////////////////////////////////////////////////////////
+// ANCHOR LINE INPUTS
+//////////////////////////////////////////////////////////////
+
+grpA = "Anchor lines"
+anchorInput = input.string("Close", "Anchor point", options=["Close", "High", "Low"], group=grpA, tooltip="Anchor lines to the close, high, or low of each completed period. Timeframes below the chart timeframe are hidden automatically.")
+maxKeep     = input.int(50, "History per timeframe", minval=1, maxval=80, group=grpA, tooltip="Past anchor lines kept per timeframe. Oldest are deleted first, independently for each timeframe.")
+
+show5m  = input.bool(false, "5 min",  group=grpA, inline="5")
+col5m   = input.color(color.gray,   "", group=grpA, inline="5")
+show15m = input.bool(false, "15 min", group=grpA, inline="15")
+col15m  = input.color(color.teal,   "", group=grpA, inline="15")
+show1h  = input.bool(true,  "1 hour", group=grpA, inline="60")
+col1h   = input.color(color.blue,   "", group=grpA, inline="60")
+show4h  = input.bool(true,  "4 hour", group=grpA, inline="240")
+col4h   = input.color(color.red,    "", group=grpA, inline="240")
+showD   = input.bool(false, "Daily",  group=grpA, inline="D")
+colD    = input.color(color.orange, "", group=grpA, inline="D")
+showW   = input.bool(false, "Weekly", group=grpA, inline="W")
+colW    = input.color(color.purple, "", group=grpA, inline="W")
+
+//////////////////////////////////////////////////////////////
+// ANCHOR LINES
+//////////////////////////////////////////////////////////////
+
+// Anchor value of the last completed bar on the given timeframe. [1] with
+// lookahead_on is the standard non-repainting way to read a finished HTF bar.
+anchorSrc = anchorInput == "High" ? high : anchorInput == "Low" ? low : close
+htf(simple string tf) =>
+    request.security(syminfo.tickerid, tf, anchorSrc[1], lookahead=barmerge.lookahead_on)
+
+v5m  = htf("5")
+v15m = htf("15")
+v1h  = htf("60")
+v4h  = htf("240")
+vD   = htf("D")
+vW   = htf("W")
+
+// Draws the anchor line for one timeframe. Each call site keeps its own
+// line history, capped at maxKeep, so timeframes never compete for the
+// global line budget. If the boundary bar has no value, the line is
+// created on the first valid bar of the period instead of being skipped.
+drawTf(bool show, simple string tf, float v, color col, int wid) =>
+    var line[] lines = array.new<line>()
+    var bool pending = false
+    if show
+        if timeframe.change(tf)
+            pending := true
+        if pending and not na(v) and bar_index > 0
+            array.push(lines, line.new(time[1], v, time, v, xloc=xloc.bar_time, color=col, width=wid))
+            if array.size(lines) > maxKeep
+                line.delete(array.shift(lines))
+            pending := false
+        if not pending and array.size(lines) > 0
+            line.set_x2(array.last(lines), time)
+
+drawTf(show5m  and tfUsable("5"),   "5",   v5m,  col5m,  1)
+drawTf(show15m and tfUsable("15"),  "15",  v15m, col15m, 1)
+drawTf(show1h  and tfUsable("60"),  "60",  v1h,  col1h,  1)
+drawTf(show4h  and tfUsable("240"), "240", v4h,  col4h,  2)
+drawTf(showD   and tfUsable("D"),   "D",   vD,   colD,   2)
+drawTf(showW   and tfUsable("W"),   "W",   vW,   colW,   3)
+
+//////////////////////////////////////////////////////////////
+// VWAP INPUTS
+//////////////////////////////////////////////////////////////
+
+grpV = "VWAP"
+vwapSrc = input.source(hlc3, "VWAP source", group=grpV, tooltip="hlc3 matches TradingView's built-in VWAP.")
+
+showVwap1 = input.bool(true, "Anchor 1", group=grpV, inline="v1")
+tfVwap1   = input.timeframe("W", "", group=grpV, inline="v1")
+showPrev1 = input.bool(false, "prev. close", group=grpV, inline="v1")
+showVwap2 = input.bool(true, "Anchor 2", group=grpV, inline="v2")
+tfVwap2   = input.timeframe("D", "", group=grpV, inline="v2")
+showPrev2 = input.bool(false, "prev. close", group=grpV, inline="v2")
+showVwap3 = input.bool(true, "Anchor 3", group=grpV, inline="v3")
+tfVwap3   = input.timeframe("240", "", group=grpV, inline="v3")
+showPrev3 = input.bool(false, "prev. close", group=grpV, inline="v3")
+showVwap4 = input.bool(true, "Anchor 4", group=grpV, inline="v4")
+tfVwap4   = input.timeframe("60", "", group=grpV, inline="v4")
+showPrev4 = input.bool(false, "prev. close", group=grpV, inline="v4")
+
+//////////////////////////////////////////////////////////////
+// VWAP CALCULATIONS
+//////////////////////////////////////////////////////////////
+
+// Anchored VWAP for one timeframe: sums reset at each period boundary.
+// Returns the running VWAP and the VWAP frozen at the previous period's
+// close. No request.security() involved, so these never repaint.
+vwapTf(simple string tf, float src) =>
+    isNew = timeframe.change(tf)
+    var float sumPV  = na
+    var float sumVol = na
+    sumPV  := isNew ? src * volume : sumPV + src * volume
+    sumVol := isNew ? volume : sumVol + volume
+    vwap = sumPV / sumVol
+    var float prevClose = na
+    prevClose := isNew ? vwap[1] : prevClose
+    [vwap, prevClose]
+
+[vwap1raw, prev1raw] = vwapTf(tfVwap1, vwapSrc)
+[vwap2raw, prev2raw] = vwapTf(tfVwap2, vwapSrc)
+[vwap3raw, prev3raw] = vwapTf(tfVwap3, vwapSrc)
+[vwap4raw, prev4raw] = vwapTf(tfVwap4, vwapSrc)
+
+use1 = showVwap1 and tfUsable(tfVwap1)
+use2 = showVwap2 and tfUsable(tfVwap2)
+use3 = showVwap3 and tfUsable(tfVwap3)
+use4 = showVwap4 and tfUsable(tfVwap4)
+
+vwap1 = use1 ? vwap1raw : na
+vwap2 = use2 ? vwap2raw : na
+vwap3 = use3 ? vwap3raw : na
+vwap4 = use4 ? vwap4raw : na
+prev1 = use1 and showPrev1 ? prev1raw : na
+prev2 = use2 and showPrev2 ? prev2raw : na
+prev3 = use3 and showPrev3 ? prev3raw : na
+prev4 = use4 and showPrev4 ? prev4raw : na
+
+// VWAP needs volume; only complain while a VWAP is actually enabled so
+// the anchor lines remain usable on volume-less symbols.
+cumVol = ta.cum(nz(volume))
+if barstate.islast and cumVol == 0 and (showVwap1 or showVwap2 or showVwap3 or showVwap4)
+    runtime.error("This symbol has no volume data, so VWAP cannot be calculated. Disable the VWAP anchors to keep using the anchor lines.")
+
+//////////////////////////////////////////////////////////////
+// PLOTS
+//////////////////////////////////////////////////////////////
+
+// na (not red) while the VWAP itself is unavailable.
+vwapColor(float v) =>
+    na(v) ? na : close > v ? color.green : color.red
+
+plot(vwap1, style=plot.style_circles, color=vwapColor(vwap1), linewidth=1, title="VWAP anchor 1")
+plot(vwap2, style=plot.style_circles, color=vwapColor(vwap2), linewidth=1, title="VWAP anchor 2")
+plot(vwap3, style=plot.style_circles, color=vwapColor(vwap3), linewidth=1, title="VWAP anchor 3")
+plot(vwap4, style=plot.style_circles, color=vwapColor(vwap4), linewidth=1, title="VWAP anchor 4")
+
+plot(prev1, style=plot.style_circles, color=vwapColor(prev1), linewidth=1, title="Prev. period VWAP close 1")
+plot(prev2, style=plot.style_circles, color=vwapColor(prev2), linewidth=1, title="Prev. period VWAP close 2")
+plot(prev3, style=plot.style_circles, color=vwapColor(prev3), linewidth=1, title="Prev. period VWAP close 3")
+plot(prev4, style=plot.style_circles, color=vwapColor(prev4), linewidth=1, title="Prev. period VWAP close 4")
