@@ -5,6 +5,11 @@
 // merged with four anchored multi-timeframe VWAPs.
 //
 // Revision notes:
+//  - Anchor values are computed from the chart's own candles instead of
+//    request.security(): the D/W feeds build their bars differently from
+//    intraday charts (session templates, extended hours, futures
+//    settlement closes), which made daily/weekly lines sit far from the
+//    candles on lower timeframes.
 //  - Timeframes below the chart timeframe are hidden automatically:
 //    request.security() cannot read a lower timeframe reliably and
 //    timeframe.change() would fire on every chart bar, producing data
@@ -52,18 +57,32 @@ colW    = input.color(color.purple, "", group=grpA, inline="W")
 // ANCHOR LINES
 //////////////////////////////////////////////////////////////
 
-// Anchor value of the last completed bar on the given timeframe. [1] with
-// lookahead_on is the standard non-repainting way to read a finished HTF bar.
-anchorSrc = anchorInput == "High" ? high : anchorInput == "Low" ? low : close
-htf(simple string tf) =>
-    request.security(syminfo.tickerid, tf, anchorSrc[1], lookahead=barmerge.lookahead_on)
+// Anchor value of the last completed period, built from the chart's own
+// candles rather than request.security(). The D/W feeds construct their
+// bars differently from an intraday chart (regular-session-only closes,
+// futures settlement prices, extended hours), so security() values can
+// sit at a price no visible candle ever printed. Tracking chart bars
+// guarantees the line lands exactly on the last candle of each period.
+// Non-repainting: only completed-period values are ever returned.
+anchorTf(simple string tf) =>
+    var float hi = na
+    var float lo = na
+    var float anchor = na
+    if timeframe.change(tf)
+        anchor := anchorInput == "High" ? hi : anchorInput == "Low" ? lo : close[1]
+        hi := high
+        lo := low
+    else
+        hi := math.max(nz(hi, high), high)
+        lo := math.min(nz(lo, low), low)
+    anchor
 
-v5m  = htf("5")
-v15m = htf("15")
-v1h  = htf("60")
-v4h  = htf("240")
-vD   = htf("D")
-vW   = htf("W")
+v5m  = anchorTf("5")
+v15m = anchorTf("15")
+v1h  = anchorTf("60")
+v4h  = anchorTf("240")
+vD   = anchorTf("D")
+vW   = anchorTf("W")
 
 // Draws the anchor line for one timeframe. Each call site keeps its own
 // line history, capped at maxKeep, so timeframes never compete for the
