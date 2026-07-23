@@ -1,0 +1,84 @@
+// Saty Phase Oscillator
+// Copyright (C) 2022-2024 Saty Mahajan
+// A useful range-based signal to monitor various phases of the market.
+//
+// Refactored to expose the previously hard-coded periods and multipliers as
+// user-configurable inputs, so they can be tuned from the indicator settings.
+
+//@version=5
+indicator("Saty Phase Oscillator")
+
+// ---------------------------------------------------------------------------
+// Inputs (previously hard-coded values)
+// ---------------------------------------------------------------------------
+var string GRP_LENGTHS = "Lengths"
+pivot_length      = input.int(21, "Pivot EMA Length", minval = 1, group = GRP_LENGTHS, tooltip = "Length of the EMA used as the pivot reference.")
+atr_length        = input.int(14, "ATR Length", minval = 1, group = GRP_LENGTHS, tooltip = "Length of the ATR used for compression and oscillator scaling.")
+bband_length      = input.int(21, "Bollinger Band Length", minval = 1, group = GRP_LENGTHS, tooltip = "Length of the standard deviation used for the Bollinger Bands.")
+signal_smoothing  = input.int(3, "Signal Smoothing Length", minval = 1, group = GRP_LENGTHS, tooltip = "EMA length used to smooth the raw oscillator signal.")
+
+var string GRP_MULTS = "Multipliers"
+bband_mult        = input.float(2.0, "Bollinger Band Multiplier", minval = 0.0, step = 0.1, group = GRP_MULTS)
+compression_mult  = input.float(2.0, "Compression ATR Multiplier", minval = 0.0, step = 0.1, group = GRP_MULTS)
+expansion_mult    = input.float(1.854, "Expansion ATR Multiplier", minval = 0.0, step = 0.1, group = GRP_MULTS)
+oscillator_mult   = input.float(3.0, "Oscillator ATR Multiplier", minval = 0.1, step = 0.1, group = GRP_MULTS, tooltip = "Scales the oscillator; larger values compress the range.")
+
+var string GRP_ZONES = "Zone Levels"
+extended_level      = input.float(100.0, "Extended Zone", group = GRP_ZONES)
+distribution_level  = input.float(61.8, "Distribution / Accumulation Zone", group = GRP_ZONES)
+neutral_level       = input.float(23.6, "Neutral Zone", group = GRP_ZONES)
+
+// Standard Colors
+green = color.rgb(0,255,0)
+red = color.rgb(255,0,0)
+magenta = color.rgb(255,0,255)
+light_gray = color.rgb(200,200,200)
+gray = color.rgb(150,150,150)
+dark_gray = color.rgb(100,100,100)
+
+// Pivot Data
+pivot = ta.ema(close, pivot_length)
+above_pivot = close >= pivot
+
+// Shared ATR (computed once instead of repeatedly)
+atr = ta.atr(atr_length)
+
+// Phases
+extended_up_zone = plot(extended_level, "Extended Up Zone", color = light_gray, linewidth = 1)
+distribution_zone = plot(distribution_level, "Distribution Zone", color = gray, linewidth = 1)
+neutral_up_zone = plot(neutral_level, "Neutral Up Zone", color = dark_gray, linewidth = 1)
+neutral_down_zone = plot(-neutral_level, "Neutral Down Zone", color = dark_gray, linewidth = 1)
+accumulation_zone = plot(-distribution_level, "Accumulation Zone", color = gray, linewidth = 1)
+extended_down_zone = plot(-extended_level, "Extended Down Zone", color = light_gray, linewidth = 1)
+
+// # Bollinger Band Compression Signal
+bband_offset = bband_mult * ta.stdev(close, bband_length)
+bband_up = pivot + bband_offset
+bband_down = pivot - bband_offset
+compression_threshold_up = pivot + (compression_mult * atr)
+compression_threshold_down = pivot - (compression_mult * atr)
+expansion_threshold_up = pivot + (expansion_mult * atr)
+expansion_threshold_down = pivot - (expansion_mult * atr)
+compression = above_pivot ? (bband_up - compression_threshold_up) : (compression_threshold_down - bband_down)
+in_expansion_zone = above_pivot ? (bband_up - expansion_threshold_up) : (expansion_threshold_down - bband_down)
+expansion = compression[1] <= compression[0]
+compression_tracker = false
+if expansion and in_expansion_zone > 0
+    compression_tracker := false
+else if compression <= 0
+    compression_tracker := true
+else
+    compression_tracker := false
+compression_signal = plot(0, "Compression Signal", color = compression_tracker ? magenta : dark_gray, linewidth = 2)
+
+// # Compressing / Expanding / Expanded
+var tbl = table.new(position.top_right, 1, 1)
+if barstate.islast
+    table.cell(tbl, 0, 0, 'Compression', bgcolor = magenta)
+if compression_tracker == false
+    table.clear(tbl,0,0,0,0)
+
+// Saty Phase Oscillator Signal
+raw_signal = ((close - pivot) / (oscillator_mult * atr)) * 100
+oscillator = ta.ema(raw_signal, signal_smoothing)
+phase_oscillator = plot(oscillator, "Phase Oscillator", linewidth = 2, color = compression_tracker ? magenta : (oscillator >= 0.0 ? green : red))
