@@ -1,0 +1,235 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//
+// Name:    CVD + 2 VWAP + PVT Osc [merged, shared scale]
+// Merged:  2026-07-25
+//
+// Source indicators
+//   1) "PVT Osc - Price Volume Trend Oscillator [UTS]"  (Pine v4)  © UberTradingSystems
+//   2) "CVD + 2 VWAP (selectable source)"               (Pine v6)
+//
+// Difference vs. "CVD + 2 VWAP + PVT Osc [merged]"
+//   That version keeps the base series in its own units (volume for CVD) and stretches the PVT
+//   oscillator up to match it. This version instead normalizes BOTH sides into one shared,
+//   unitless band of ±"Scale range": the CVD candles, both VWAPs and the PVT oscillator are all
+//   divided by their own recent amplitude, so they share one zero line and one pair of ±bounds
+//   and can be compared directly. Values on the price axis are therefore ratios, not volume.
+//
+// Consequences worth knowing
+//   * With the rolling window, each bar is divided by the amplitude measured at that bar, so
+//     candle bodies are warped relative to raw CVD (the usual cost of rolling normalization).
+//     "Scale window = All history" uses a running maximum instead - no warp, but the band fills
+//     up slowly and compresses once a big outlier lands.
+//   * Turning "PVT: Normalize data" off plots raw PVT and breaks the shared scale by design.
+
+//@version=6
+indicator("CVD + 2 VWAP + PVT Osc [merged, shared scale]", "CVD+2VWAP+PVTOsc SS", format = format.price, precision = 3)
+
+import TradingView/ta/8 as tvta
+
+// ─────────────────────────────── Const ───────────────────────────────
+
+kMaColor      = color.aqua
+kNeutralColor = color.gray
+kBearColor    = color.red
+kBullColor    = color.green
+kCrossUpColor = color.yellow
+kCrossDnColor = color.fuchsia
+
+kEma  = "EMA"
+kSma  = "SMA"
+kVwma = "VWMA"
+kWma  = "WMA"
+
+kWinRolling = "Rolling"
+kWinAll     = "All history"
+
+kCenterAuto = "Auto"
+kCenterZero = "Zero"
+kCenterMid  = "Range midline"
+
+// ─────────────────────────────── Input ───────────────────────────────
+
+// Base source (from CVD + 2 VWAP)
+modeIn = input.string("CVD", "Base source", options = ["CVD", "Chart price", "Custom source"], group = "Source")
+srcIn  = input.source(close, "Custom source series", group = "Source")
+
+// CVD
+anchorInput = input.timeframe("1D", "CVD anchor period", group = "CVD")
+useCustomTF = input.bool(false, "Use custom lower timeframe", group = "CVD")
+lowerTFIn   = input.timeframe("1", "Lower timeframe", active = useCustomTF, group = "CVD")
+
+// VWAP
+vwapTF1 = input.timeframe("60", "VWAP #1 anchor", group = "VWAP")
+vwapTF2 = input.timeframe("1D", "VWAP #2 anchor", group = "VWAP")
+
+// Shared scale
+sc_range  = input.float(1.0, "Scale: Range (±)", minval = 0.01, step = 0.1, tooltip = "Both the base series and the PVT oscillator are mapped into ±this value. The axis becomes unitless.", group = "Shared Scale")
+sc_window = input.string(kWinRolling, "Scale: Window", options = [kWinRolling, kWinAll], tooltip = "Rolling: amplitude from the last N bars (adaptive, warps historical candle sizes). All history: running maximum since the first bar (no warp, slower to fill the band).", group = "Shared Scale")
+sc_lb     = input.int(100, "Scale: Look-back (bars)", minval = 2, active = true, group = "Shared Scale")
+sc_center = input.string(kCenterAuto, "Scale: Base centering", options = [kCenterAuto, kCenterZero, kCenterMid], tooltip = "Auto = Zero for CVD (already zero-centred), Range midline for Chart price / Custom source. The PVT oscillator is always centred on zero.", group = "Shared Scale")
+sc_bounds = input.bool(true, "Scale: Show ±range bounds", group = "Shared Scale")
+
+// PVT Osc
+pvt_show              = input.bool(true, "PVT: Show oscillator", group = "PVT Osc")
+pvt_tf                = input.timeframe("", "PVT: Calculation timeframe", tooltip = "Empty = chart timeframe. The original script was locked to 15m - enter 15 to reproduce it. Avoid timeframes lower than the chart's.", group = "PVT Osc")
+pvt_maType            = input.string(kEma, "PVT: Smoothing Type", options = [kEma, kSma, kVwma, kWma], group = "PVT Osc")
+pvt_short             = input.int(3, "PVT: Short Period", minval = 1, group = "PVT Osc")
+pvt_long              = input.int(10, "PVT: Long Period", minval = 2, group = "PVT Osc")
+pvt_showTrend         = input.bool(false, "PVT: Visualize Trend", group = "PVT Osc")
+pvt_showFill          = input.bool(true, "PVT: Apply Filling", group = "PVT Osc")
+pvt_showMa            = input.bool(true, "PVT: Show Moving Average", group = "PVT Osc")
+pvt_oscMaType         = input.string(kSma, "PVT: Moving Average Type", options = [kEma, kSma, kVwma, kWma], group = "PVT Osc")
+pvt_maLength          = input.int(13, "PVT: Moving Average Length", minval = 1, group = "PVT Osc")
+pvt_cross             = input.bool(true, "PVT: Visualize Zero-Line Crosses", group = "PVT Osc")
+pvt_shouldNormalize   = input.bool(true, "PVT: Normalize data", tooltip = "Off = plot raw PVT values, which breaks the shared scale.", group = "PVT Osc")
+pvt_normalizeLookback = input.int(25, "PVT: Normalization look-back period", minval = 1, tooltip = "Used instead of the shared look-back, so the oscillator keeps the original script's responsiveness.", group = "PVT Osc")
+
+// ───────────────────────────── Functions ─────────────────────────────
+
+isRising(float sig) =>
+    sig > sig[1]
+
+isFlat(float sig) =>
+    sig == sig[1]
+
+pvt_trendColor(float sig) =>
+    isFlat(sig) ? kNeutralColor : isRising(sig) ? kBullColor : kBearColor
+
+pvt_color(float sig) =>
+    isFlat(sig) ? kNeutralColor : sig > 0 ? kBullColor : kBearColor
+
+osc_color(float sig) =>
+    sig == 0 ? kNeutralColor : sig > 0 ? kBullColor : kBearColor
+
+// Running extremes for the "All history" scale window
+runHigh(float x) =>
+    var float m = na
+    m := na(m) ? x : na(x) ? m : math.max(m, x)
+    m
+
+runLow(float x) =>
+    var float m = na
+    m := na(m) ? x : na(x) ? m : math.min(m, x)
+    m
+
+// All four MAs are evaluated on every bar, then one is selected - required for correct
+// history in v6 (the v4 original computed them inside `if` blocks).
+smooth(simple string t, float sig, simple int len) =>
+    maSma  = ta.sma(sig, len)
+    maEma  = ta.ema(sig, len)
+    maWma  = ta.wma(sig, len)
+    maVwma = ta.vwma(sig, len)
+    switch t
+        kSma  => maSma
+        kEma  => maEma
+        kWma  => maWma
+        kVwma => maVwma
+        =>       sig
+
+calc_pvt() =>
+    vt = ta.cum(nz(ta.change(close) / close[1] * volume))
+    smooth(pvt_maType, vt, pvt_short) - smooth(pvt_maType, vt, pvt_long)
+
+avwap(float src, float wt, simple string tf) =>
+    var float cumPV = 0.
+    var float cumW  = 0.
+    newA = ta.change(time(tf)) != 0
+    if newA
+        cumPV := nz(src) * nz(wt)
+        cumW  := nz(wt)
+    else
+        cumPV += nz(src) * nz(wt)
+        cumW  += nz(wt)
+    cumW == 0 ? na : cumPV / cumW
+
+// ──────────────────────── CVD / base series ──────────────────────────
+
+var lowerTF = switch
+    useCustomTF          => lowerTFIn
+    timeframe.isseconds  => "1S"
+    timeframe.isintraday => "1"
+    timeframe.isdaily    => "5"
+    =>                      "60"
+
+[openVolume, maxVolume, minVolume, lastVolume] = tvta.requestVolumeDelta(lowerTF, anchorInput)
+
+isCVD = modeIn == "CVD"
+isPx  = modeIn == "Chart price"
+isSrc = modeIn == "Custom source"
+
+baseSrc = isCVD ? lastVolume : isPx ? hlc3 : srcIn
+wt      = nz(volume) == 0 ? 1.0 : volume
+
+vw1 = avwap(baseSrc, wt, vwapTF1)
+vw2 = avwap(baseSrc, wt, vwapTF2)
+
+rawO = isCVD ? openVolume : isPx ? open  : na
+rawH = isCVD ? maxVolume  : isPx ? high  : na
+rawL = isCVD ? minVolume  : isPx ? low   : na
+rawC = isCVD ? lastVolume : isPx ? close : na
+
+// ─────────────────────── Shared scale mapping ────────────────────────
+
+// Amplitude of the base series, measured on whatever it currently is
+baseHiSrc = isCVD ? maxVolume : isPx ? high : srcIn
+baseLoSrc = isCVD ? minVolume : isPx ? low  : srcIn
+baseHi    = sc_window == kWinAll ? runHigh(baseHiSrc) : ta.highest(nz(baseHiSrc), sc_lb)
+baseLo    = sc_window == kWinAll ? runLow(baseLoSrc)  : ta.lowest(nz(baseLoSrc), sc_lb)
+
+baseZeroCentred = sc_center == kCenterZero or (sc_center == kCenterAuto and isCVD)
+baseCenter      = baseZeroCentred ? 0.0 : (nz(baseHi) + nz(baseLo)) / 2
+baseHalf        = baseZeroCentred ? math.max(math.abs(nz(baseHi)), math.abs(nz(baseLo))) : (nz(baseHi) - nz(baseLo)) / 2
+
+scaleBase(float x) =>
+    baseHalf > 0 ? (x - baseCenter) / baseHalf * sc_range : na
+
+cndO = scaleBase(rawO)
+cndH = scaleBase(rawH)
+cndL = scaleBase(rawL)
+cndC = scaleBase(rawC)
+cCol = rawC >= rawO ? color.teal : color.red
+
+vw1s = scaleBase(vw1)
+vw2s = scaleBase(vw2)
+srcs = scaleBase(srcIn)
+
+// ───────────────────────────── PVT Osc ───────────────────────────────
+
+pvt_raw    = request.security(syminfo.tickerid, pvt_tf, calc_pvt(), lookahead = barmerge.lookahead_off)
+pvt_absMax = sc_window == kWinAll ? runHigh(math.abs(pvt_raw)) : ta.highest(math.abs(pvt_raw), pvt_normalizeLookback)
+pvt_unit   = nz(pvt_absMax) > 0 ? pvt_raw / pvt_absMax : 0.0            // ±1
+pvt_core   = pvt_shouldNormalize ? pvt_unit * sc_range : pvt_raw        // same band as the base series
+pvt_maCore = smooth(pvt_oscMaType, pvt_core, pvt_maLength)
+
+value_pvt = pvt_show ? pvt_core : na
+value_ma  = pvt_show and pvt_showMa ? pvt_maCore : na
+
+color_pvt = pvt_showTrend ? pvt_trendColor(pvt_core) : pvt_color(pvt_core)
+color_osc = pvt_showFill ? color.new(osc_color(pvt_core), 75) : na
+
+crossUpCond  = pvt_show and ta.crossover(pvt_core, 0)
+crossDnCond  = pvt_show and ta.crossunder(pvt_core, 0)
+draw_crossUp = pvt_cross and crossUpCond ? 0.0 : na
+draw_crossDn = pvt_cross and crossDnCond ? 0.0 : na
+
+// ──────────────────────────── Drawings ───────────────────────────────
+
+plotcandle(cndO, cndH, cndL, cndC, "Base candles", color = cCol, bordercolor = cCol, wickcolor = cCol)
+plot(isSrc ? srcs : na, "Custom source", color = color.new(#2962ff, 0), linewidth = 2)
+plot(vw1s, "VWAP #1", style = plot.style_circles, linewidth = 1, color = baseSrc >= vw1 ? color.green : color.red)
+plot(vw2s, "VWAP #2", style = plot.style_circles, linewidth = 1, color = baseSrc >= vw2 ? color.green : color.maroon)
+
+hline(0, "Zero Line", color = color.new(color.gray, 40), linewidth = 1)
+hline(sc_bounds ? sc_range : na, "Upper Bound", color = color.new(color.gray, 70), linestyle = hline.style_dotted)
+hline(sc_bounds ? -sc_range : na, "Lower Bound", color = color.new(color.gray, 70), linestyle = hline.style_dotted)
+
+plot_pvt  = plot(value_pvt, "PVT", color = color_pvt, linewidth = 1)
+plot_zero = plot(pvt_show ? 0.0 : na, "PVT fill anchor", color = color.new(color.gray, 100), editable = false)
+fill(plot_pvt, plot_zero, title = "PVT Oscillator Fill", color = color_osc)
+plot(value_ma, "PVT MA", color = pvt_showMa ? kMaColor : na, linewidth = 1)
+
+plotshape(draw_crossUp, title = "PVT Cross Up", style = shape.xcross, location = location.absolute, color = kCrossUpColor, size = size.auto)
+plotshape(draw_crossDn, title = "PVT Cross Down", style = shape.xcross, location = location.absolute, color = kCrossDnColor, size = size.auto)
+
+alertcondition(crossUpCond, "PVT Cross Up", "PVT oscillator crossed above zero")
+alertcondition(crossDnCond, "PVT Cross Down", "PVT oscillator crossed below zero")
